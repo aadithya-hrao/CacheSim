@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <omp.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,7 +12,9 @@ enum mesi_state { Invalid, Shared, Exclusive, Modified };
 typedef enum mesi_state mesi_state;
 
 #ifdef DEBUG
-#define debug(...) ;printf(__VA_ARGS__)
+#define debug(...)                                                             \
+  ;                                                                            \
+  printf(__VA_ARGS__)
 #else
 #define debug(...)
 #endif
@@ -30,7 +31,6 @@ struct decoded_inst {
   byte address;
   byte value; // Only used for WR
 };
-#include <stdbool.h>
 typedef struct cache cache;
 typedef struct decoded_inst decoded;
 
@@ -66,8 +66,6 @@ decoded decode_inst_line(char *buffer) {
   return inst;
 }
 
-// send bus signal
-
 // Helper function to print the cachelines
 void print_cachelines(cache *c, int cache_size) {
   for (int i = 0; i < cache_size; i++) {
@@ -102,15 +100,15 @@ void cpu_loop(int num_threads) {
     *(c + i) = (cache *)malloc(sizeof(cache) * cache_size);
   }
 
-
 #pragma omp parallel num_threads(num_threads)
   {
 
-    int tid = omp_get_thread_num();
+    // processor num
+    int core = omp_get_thread_num();
 
     // Input file for the core
     char filename[20];
-    sprintf(filename, "input_%d.txt", tid % 2);
+    sprintf(filename, "input_%d.txt", core);
     printf("Reading from file: %s\n", filename);
     // Read Input file
     FILE *inst_file = fopen(filename, "r");
@@ -120,38 +118,40 @@ void cpu_loop(int num_threads) {
 #pragma omp single
       printf("\nClock tick\n");
 
+      decoded inst = decode_inst_line(inst_line);
 
-        decoded inst = decode_inst_line(inst_line);
-
-        // direct mapping hash
-        int hash = inst.address % cache_size;
+      // direct mapping hash
+      int hash = inst.address % cache_size;
 
       // make memory access atomic
-      #pragma omp critical
-      {
-        // replace the cacheline if the address is different and data is
-        // modified
-        if (c[tid][hash].address != inst.address && (c[tid][hash].state == Modified || c[tid][hash].state == Shared)) {
-          // Flush current cacheline to memory
-          debug("Flushing cacheline at address %d to memory\n",
-                c[tid][hash].address);
-          // #pragma omp critical
-          memory[c[tid][hash].address] = c[tid][hash].value;
-          c[tid][hash].value = memory[inst.address];
-          c[tid][hash].address = inst.address;
+      // replace the cacheline if the address is different and data is
+      // modified
+      if (c[core][hash].address != inst.address &&
+          (c[core][hash].state == Modified || c[core][hash].state == Shared)) {
+        // Flush current cacheline to memory
+        debug("Flushing cacheline at address %d to memory\n",
+              c[core][hash].address);
+        // prevent concurrent access to memory
+#pragma omp critical(mem_access)
+        {
+          memory[c[core][hash].address] = c[core][hash].value;
+          c[core][hash].value = memory[inst.address];
         }
-        if (inst.type == 1) /* Write operation */ {
-          c[tid][hash].address = inst.address;
-          c[tid][hash].value = inst.value;
-          c[tid][hash].state = Modified;
+        c[core][hash].address = inst.address;
+      }
+      if (inst.type == 1) /* Write operation */ {
+        c[core][hash].address = inst.address;
+        c[core][hash].value = inst.value;
+        c[core][hash].state = Modified;
 
+        // invalidate other caches if data is not exclusive
+        if (c[core][hash].state != Exclusive) {
 
-          // invalidate other caches if data is not exclusive
-          if (c[tid][hash].state != Exclusive) {
-
-            // iterate and invalidate other caches
+          // iterate and invalidate other caches
+#pragma omp critical(cache_access)
+          {
             for (int i = 0; i < num_threads; i++) {
-              if (i == tid)
+              if (i == core)
                 continue;
               if (c[i][hash].address == inst.address) {
                 debug("Core %d: Invalidating address %d\n", i, inst.address);
@@ -159,51 +159,57 @@ void cpu_loop(int num_threads) {
               }
             }
           }
+        }
 
-          // set the state to modified
+        // set the state to modified
 
-        } else /* Read Operation*/ {
-          if(c[tid][hash].address != inst.address || c[tid][hash].state == Invalid) /* read miss */ {
-            debug("Read Miss\n");
-            bool found = false;
-            for(int i=0; i<num_threads; i++) {
-              if(i == tid || c[i][hash].address != inst.address)
+      } else /* Read Operation*/ {
+        if (c[core][hash].address != inst.address ||
+            c[core][hash].state == Invalid) /* read miss */ {
+          debug("Read Miss\n");
+          bool found = false;
+#pragma omp critical(cache_access)
+          {
+            for (int i = 0; i < num_threads; i++) {
+              if (i == core || c[i][hash].address != inst.address)
                 continue;
-              if(c[i][hash].state != Invalid){
+              if (c[i][hash].state != Invalid) {
                 // data found in other cache
-                c[tid][hash] = c[i][hash];
+                c[core][hash] = c[i][hash];
                 c[i][hash].state = Shared;
-                c[tid][hash].state = Shared;
+                c[core][hash].state = Shared;
                 found = true;
               }
             }
-            if(!found) {
-              // fetch data from mem
-              c[tid][hash].value = memory[inst.address];
-              c[tid][hash].state = Exclusive;
-              c[tid][hash].address = inst.address;
-
-            }
-
           }
-
-
+          if (!found) {
+// fetch data from mem
+#pragma omp critical(mem_access)
+            {
+              c[core][hash].value = memory[inst.address];
+              c[core][hash].state = Exclusive;
+              c[core][hash].address = inst.address;
+            }
+          }
         }
-        // #pragma omp critical
+      }
+#pragma omp critical(print)
+      {
         switch (inst.type) {
         case 0:
-          printf("Core %d Reading from address %02d: %02d\n", tid,
-                 c[tid][hash].address, c[tid][hash].value);
+          printf("Core %d Reading from address %02d: %02d\n", core,
+                 c[core][hash].address, c[core][hash].value);
           break;
 
         case 1:
-          printf("Core %d Writing   to address %02d: %02d\n", tid, c[tid][hash].address,
-                 c[tid][hash].value);
+          printf("Core %d Writing   to address %02d: %02d\n", core,
+                 c[core][hash].address, c[core][hash].value);
           break;
         }
+#ifdef DEBUG
         debug("Memory: ");
         for (int i = 0; i < 24; i++) {
-          debug("%02d:%02d ",i, memory[i]);
+          debug("%02d:%02d ", i, memory[i]);
         }
         debug("\n");
         for (int i = 0; i < num_threads; i++) {
@@ -211,12 +217,9 @@ void cpu_loop(int num_threads) {
           print_cachelines(*(c + i), cache_size);
           debug("\n");
         }
-
-#ifdef DEBUG
-        getchar();
-#endif
-
+        #endif
       }
+
       // synchronize clock tick
 #pragma omp barrier
     }
