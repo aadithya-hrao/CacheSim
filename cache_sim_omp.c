@@ -1,3 +1,15 @@
+/*
+ * Filename: cache_sim.c
+ * This is a very basic C cache simulator.
+  * The input files for each "Core" must be named core_1.txt, core_2.txt,
+ * core_3.txt ... core_n.txt Input files consist of the following instructions:
+ * - RD <address>
+ * - WR <address> <val>
+ *
+ * compiling with DEBUG macro defined gives info about
+ * cache and memory at each cycle and executes each core
+ * atomically.
+ */
 #include <omp.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -34,13 +46,6 @@ struct decoded_inst {
 typedef struct cache cache;
 typedef struct decoded_inst decoded;
 
-/*
- * This is a very basic C cache simulator.
- * The input files for each "Core" must be named core_1.txt, core_2.txt,
- * core_3.txt ... core_n.txt Input files consist of the following instructions:
- * - RD <address>
- * - WR <address> <val>
- */
 
 byte *memory;
 
@@ -100,6 +105,16 @@ void cpu_loop(int num_threads) {
     *(c + i) = (cache *)malloc(sizeof(cache) * cache_size);
   }
 
+  // Initial cache state
+  #ifdef DEBUG
+  debug("Initial Cache State\n");
+  for (int i = 0; i < num_threads; i++) {
+    debug("\tCore %d\n", i);
+    print_cachelines(*(c + i), cache_size);
+    debug("\n");
+  }
+  #endif
+
 #pragma omp parallel num_threads(num_threads)
   {
 
@@ -110,18 +125,21 @@ void cpu_loop(int num_threads) {
     char filename[20];
     sprintf(filename, "input_%d.txt", core);
     printf("Reading from file: %s\n", filename);
+
     // Read Input file
     FILE *inst_file = fopen(filename, "r");
     char inst_line[20];
+
     // Decode instructions and execute them.
     while (fgets(inst_line, sizeof(inst_line), inst_file)) {
 #pragma omp single
       printf("\nClock tick\n");
+
 #ifdef DEBUG
 #  pragma omp critical(test)
       {
-
 #endif
+
         decoded inst = decode_inst_line(inst_line);
 
         // direct mapping hash
