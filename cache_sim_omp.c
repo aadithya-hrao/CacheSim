@@ -133,7 +133,7 @@ void cpu_loop(int num_threads) {
     // Decode instructions and execute them.
     while (fgets(inst_line, sizeof(inst_line), inst_file)) {
 #pragma omp single
-      printf("\nClock tick\n");
+      debug("\nClock tick\n");
 
 #ifdef DEBUG
 #  pragma omp critical(test)
